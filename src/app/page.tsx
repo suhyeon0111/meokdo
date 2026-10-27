@@ -1,20 +1,13 @@
+import MapHome from "@/components/MapHome";
+
+// Day 2: 목업 집계. Day 5 에서 v_region_counts(로그인 사용자) 로 교체.
+const MOCK_COUNTS: Record<string, number> = {
+  "11680": 23, // 강남구 → stage 5
+  "41110": 12, // 수원시 장안구 → stage 3
+  "28110": 7, //  인천 중구 → stage 2
+  "26110": 3, //  부산 중구 → stage 1
+};
+
 export default function Home() {
-  return (
-    <main
-      style={{
-        maxWidth: 480,
-        margin: "0 auto",
-        padding: "48px 20px",
-        minHeight: "100dvh",
-      }}
-    >
-      <h1 style={{ fontSize: 28, marginBottom: 8 }}>meokdo</h1>
-      <p style={{ color: "var(--muted)", lineHeight: 1.6 }}>
-        맛집 기록이 쌓일수록 시군구 지도가 칠해지는 맛집 일기.
-      </p>
-      <p style={{ color: "var(--muted)", marginTop: 24, fontSize: 14 }}>
-        Day 1 셋업 완료. 다음: 경계 폴리곤 렌더(Day 2).
-      </p>
-    </main>
-  );
+  return <MapHome counts={MOCK_COUNTS} />;
 }
