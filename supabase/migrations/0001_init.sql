@@ -1,120 +1,87 @@
--- meokdo 초기 스키마 (SPEC §2)
--- 저장 원칙: 좌표·주소·카카오 상호명은 저장하지 않는다. 상호명은 사용자 입력. (DECISIONS #6)
+-- 오늘 점심 지도 — 초기 스키마 (SPEC §2)
+-- 로그인 없음. 개인 식별정보 저장 안 함. 집계 카운트만.
 
--- ─────────────────────────────── 테이블 ───────────────────────────────
+-- ─────────────── 테이블 ───────────────
 
-create table profiles (
-  id uuid primary key references auth.users(id) on delete cascade,
-  nickname text,
-  home_region_code text,
-  onboarding_done boolean not null default false,
-  created_at timestamptz not null default now()
+-- 표 집계: (오늘, 칸, 메뉴, 방문구간) 당 한 행
+create table vote_counts (
+  vote_date    date    not null,              -- KST 05:00 경계 기준 "오늘"
+  region_code  text    not null,              -- 시군구 코드
+  menu_type    text    not null,              -- 10종 중 하나(키)
+  visit_bucket text    not null,              -- 'first' | 'd2_7' | 'd8plus'
+  count        integer not null default 0,
+  primary key (vote_date, region_code, menu_type, visit_bucket)
+);
+create index vote_counts_date_region_idx on vote_counts(vote_date, region_code);
+
+-- 단계별 이벤트 횟수
+create table event_counts (
+  event_date date    not null,
+  name       text    not null,
+  count      integer not null default 0,
+  primary key (event_date, name)
 );
 
-create table records (
-  id uuid primary key default gen_random_uuid(),
-  user_id uuid not null references auth.users(id) on delete cascade,
-  place_name text not null check (char_length(place_name) between 1 and 60), -- 사용자 입력
-  region_code text not null,                 -- Turf 판정 결과
-  boundary_version date not null,            -- 판정에 쓴 경계 기준일
-  kakao_place_id text,                       -- (선택) 약관상 저장 허용. 중복감지·딥링크
-  kakao_url text,                            -- (선택) 저장 허용
-  rating smallint not null check (rating between 1 and 5),
-  memo text not null check (char_length(memo) between 1 and 200),
-  menu text,
-  visited_on date not null default current_date,
-  created_at timestamptz not null default now(),
-  updated_at timestamptz not null default now()
-);
-create unique index records_user_place_uq
-  on records(user_id, kakao_place_id) where kakao_place_id is not null;
-create index records_user_region_idx on records(user_id, region_code);
+-- ─────────────── 증가 함수 (service_role 로만 호출) ───────────────
 
-create table record_photos (
-  id uuid primary key default gen_random_uuid(),
-  record_id uuid not null references records(id) on delete cascade,
-  user_id uuid not null references auth.users(id) on delete cascade,
-  storage_path text not null,
-  sort_order smallint not null default 0,
-  created_at timestamptz not null default now()
-);
-create index record_photos_record_idx on record_photos(record_id, sort_order);
-
-create table events (
-  id bigint generated always as identity primary key,
-  user_id uuid references auth.users(id) on delete set null,
-  name text not null,
-  props jsonb not null default '{}'::jsonb,
-  created_at timestamptz not null default now()
-);
-create index events_name_created_idx on events(name, created_at);
-
-create table regions (
-  code text primary key,
-  name text not null,
-  full_name text not null,
-  sido_code text not null,
-  sido_name text not null,
-  has_gu boolean not null default false,
-  boundary_version date not null
-);
-
--- ─────────────────────────────── 함수 / 트리거 ───────────────────────────────
-
-create function touch_updated_at() returns trigger language plpgsql as $$
-begin new.updated_at = now(); return new; end $$;
-
-create trigger records_touch before update on records
-  for each row execute function touch_updated_at();
-
-create function enforce_photo_limit() returns trigger language plpgsql as $$
-begin
-  if (select count(*) from record_photos where record_id = new.record_id) >= 5 then
-    raise exception 'photo limit (5) exceeded for record %', new.record_id;
-  end if;
-  return new;
-end $$;
-
-create trigger record_photos_limit before insert on record_photos
-  for each row execute function enforce_photo_limit();
-
--- store_count -> stage (TS toStage() 와 동일하게 유지)
-create function region_stage(cnt int) returns int language sql immutable as $$
-  select case
-    when cnt <= 0 then 0 when cnt <= 5 then 1 when cnt <= 10 then 2
-    when cnt <= 15 then 3 when cnt <= 20 then 4 else 5 end
+create function bump_vote(d date, r text, m text, b text)
+returns void language sql as $$
+  insert into vote_counts(vote_date, region_code, menu_type, visit_bucket, count)
+  values (d, r, m, b, 1)
+  on conflict (vote_date, region_code, menu_type, visit_bucket)
+  do update set count = vote_counts.count + 1;
 $$;
 
--- ─────────────────────────────── 집계 뷰 ───────────────────────────────
+create function bump_event(d date, n text)
+returns void language sql as $$
+  insert into event_counts(event_date, name, count) values (d, n, 1)
+  on conflict (event_date, name) do update set count = event_counts.count + 1;
+$$;
 
--- 가게당 1기록이므로 region별 기록 수 = 서로 다른 가게 수
-create view v_region_counts with (security_invoker = true) as
-  select user_id, region_code, count(*)::int as store_count
-  from records
-  group by user_id, region_code;
+-- ─────────────── 집계 함수 ───────────────
 
--- ─────────────────────────────── RLS ───────────────────────────────
+-- 특정 칸의 메뉴별 표 합 (내림차순)
+create function top_menus(d date, r text)
+returns table(menu_type text, cnt bigint) language sql stable as $$
+  select menu_type, sum(count)::bigint
+  from vote_counts where vote_date = d and region_code = r
+  group by menu_type order by sum(count) desc;
+$$;
 
-alter table profiles      enable row level security;
-alter table records       enable row level security;
-alter table record_photos enable row level security;
-alter table events        enable row level security;
-alter table regions       enable row level security;
+-- 접두(시도) 또는 전국('')의 메뉴별 표 합
+create function top_menus_prefix(d date, p text)
+returns table(menu_type text, cnt bigint) language sql stable as $$
+  select menu_type, sum(count)::bigint
+  from vote_counts where vote_date = d and region_code like p || '%'
+  group by menu_type order by sum(count) desc;
+$$;
 
-create policy own_profiles on profiles
-  for all using (id = auth.uid()) with check (id = auth.uid());
-create policy own_records on records
-  for all using (user_id = auth.uid()) with check (user_id = auth.uid());
-create policy own_photos on record_photos
-  for all using (user_id = auth.uid()) with check (user_id = auth.uid());
-create policy own_events_insert on events
-  for insert with check (user_id = auth.uid());
-create policy own_events_select on events
-  for select using (user_id = auth.uid());
-create policy regions_read on regions
-  for select using (true);
+-- 오늘 지도: 칸별 1위 메뉴/총표/동률 (총표 5 이상만)
+create function map_today(d date)
+returns table(region_code text, top_menu text, total bigint, tie boolean)
+language sql stable as $$
+  with sums as (
+    select region_code, menu_type, sum(count)::bigint c
+    from vote_counts where vote_date = d
+    group by region_code, menu_type
+  ),
+  agg as (
+    select region_code, sum(c) total, max(c) maxc
+    from sums group by region_code
+  )
+  select a.region_code,
+         (select s.menu_type from sums s
+            where s.region_code = a.region_code and s.c = a.maxc
+            order by s.menu_type limit 1),
+         a.total,
+         (select count(*) from sums s
+            where s.region_code = a.region_code and s.c = a.maxc) > 1
+  from agg a
+  where a.total >= 5;
+$$;
 
--- Storage 버킷 record-photos(비공개) 정책은 버킷 생성 후 적용:
--- create policy photos_own on storage.objects for all
---   using (bucket_id = 'record-photos' and (storage.foldername(name))[1] = auth.uid()::text)
---   with check (bucket_id = 'record-photos' and (storage.foldername(name))[1] = auth.uid()::text);
+-- ─────────────── RLS: anon 전면 차단, service_role 만 통과 ───────────────
+alter table vote_counts  enable row level security;
+alter table event_counts enable row level security;
+-- 정책을 만들지 않음 = anon/authenticated 읽기·쓰기 모두 거부.
+-- 모든 읽기/쓰기는 Route Handler 에서 service_role 로 수행.

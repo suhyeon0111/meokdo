@@ -1,296 +1,124 @@
-# meokdo 개발 스펙 (SPEC)
+# 오늘 점심 지도 — 개발 스펙 (SPEC)
 
-작성일 2026-10-24 · **최종 개정 2026-10-26 (아키텍처 확정)** · 대상 MVP 2~3주 · 1인 개발
+작성 2026-11-02 · 기반: [기획서.md](./기획서.md) · 1인 · MVP 2~3주
 
-## 아키텍처 한 줄 요약 (확정)
-- **지도**: 카카오 타일 안 씀. 우리 **시군구 GeoJSON 폴리곤을 색칠**(MapLibre GL). 줌아웃=칸 색칠, 줌인=더 촘촘한 칸. **개별 가게 마커 없음**(좌표 미저장 — 아래 이유).
-- **가게 찾기**: 카카오 로컬 **키워드 검색을 실시간 프록시**로만 사용. 응답은 화면에만 쓰고 **저장하지 않음**.
-- **상호명**: **사용자 입력 필드**(검색 결과로 자동완성하되 사용자가 수정·확정 → 사용자 콘텐츠). → DB에 들어가는 카카오 출처 필드 0개.
-- **칸 판정**: 선택한 좌표로 서버에서 Turf 판정 → **region_code만 저장, 좌표는 버림**(저장 X).
-- 근거·대안은 DECISIONS #6 참조.
+기획서가 제품/근거의 소스다. 이 문서는 그 **엔지니어링 번역**(스키마·API 계약·클라 흐름·구현 결정)만 담는다. 중복 설명은 하지 않는다.
 
----
+## 0. 원칙이 코드에 미치는 영향 (기획서 원칙 1~3)
+- **로그인 없음** → 인증·세션·RLS(사용자 스코프)·개인 테이블 전부 없음.
+- **개인 식별정보 서버 미저장** → 서버/DB에 좌표·IP·기기식별값 없음. 저장은 집계 카운트뿐.
+- **카카오 가게 정보 미저장** → 가게 검색은 클라에서 실시간, 결과는 화면에만.
 
-## 0. 확정 스택 · 버전
+## 1. 스택 (기획서 §기술스택 확정)
 
-| 라이브러리 | 확인 버전 (npm, 2026-10-26) | 용도 |
+| 영역 | 선택 | 비고 |
 |---|---|---|
-| next | 16.4.3 | App Router |
-| react / react-dom | 19.3.1 | |
-| typescript | 최신 | |
-| @supabase/ssr | 0.12.7 | 쿠키 기반 세션(SSR 공식 권장). `auth-helpers`는 폐기됨 |
-| @supabase/supabase-js | 2.118.0 | |
-| maplibre-gl | 6.16.0 | **지도 렌더(기본)** — 베이스맵 타일 없이 GeoJSON 폴리곤 choropleth. 키·쿼터 없음 |
-| @turf/boolean-point-in-polygon | 7.4.0 | 칸 판정(저장 시 1회) |
-| mapshaper | 0.7.98 | 경계 단순화 CLI(빌드 타임) |
-| proj4 | 2.22.0 | 경계 좌표계 변환(필요 시) |
-| zod | 4.6.7 | Route Handler 입력 검증 |
-| browser-image-compression | 2.0.2 | 클라 사진 리사이즈(긴 변 1280) + EXIF 제거(재인코딩) |
+| 프레임워크 | Next.js 16.4.3 (App Router) + TS, Vercel | 화면 + 집계 API(Route Handler) |
+| 가게 검색·칸 판정 | **카카오 Maps JS SDK (services)** — 클라이언트 | `Places.keywordSearch`(근처 가게), `Geocoder.coord2RegionCode`(좌표→시군구). JS 키는 등록 도메인에서만 |
+| 점심 지도 | **d3-geo + 단순화 시군구 GeoJSON → SVG** | 카카오 타일 미사용. 캡처 쉬움. 경량 |
+| 저장소 | Supabase Postgres (**auth 미사용**) | 집계 카운트만. 쓰기는 Route Handler + service_role |
+| 레이트리밋 | 만료 카운터(Upstash Redis 권장, DECISIONS) | IP를 DB에 남기지 않음 |
 
-- 대안 렌더러: Leaflet 1.9.4 (GeoJSON 레이어, 더 단순하나 대용량 폴리곤·data-driven 색칠은 MapLibre가 유리). **MapLibre 채택**.
-- 카카오: **로컬 REST 키워드 검색 1종만** 사용(실시간 프록시). 지도 JS SDK·타일 미사용. REST 키는 서버 env(`KAKAO_REST_KEY`)에서만, 브라우저 노출 금지.
-- 배포: Vercel **(가정)**. Route Handler = Vercel Functions(Node 런타임).
-- 경계 데이터: SGIS 시군구 경계(2025-06-30 기준본) + **2026-07 개편(인천 2군·9구, 전남광주통합특별시) 수동 패치**(DECISIONS #1·#3, 베타 전 1회).
+버전(2026-11-02 npm): next 16.4.3 · react 19.3.1 · @supabase/supabase-js 2.118.0 · d3-geo(**미확인, 설치 시 확정**) · topojson-client(선택).
+- 카카오 JS SDK services 한도(한 번 최대 45개, 반경 최대 20km)는 **공식 문서로 재확인**(기획서 §API, 리스크).
 
----
+## 2. 데이터 모델 (Supabase Postgres)
 
-## 1. 화면 목록 · 라우트 구조 (App Router)
-
-원칙: 데이터 패칭·인증 가드는 서버 컴포넌트(RSC), 지도/폼/업로드 등 상호작용은 클라이언트 컴포넌트(`"use client"`). MapLibre·Turf(클라 미사용)·canvas 리사이즈는 클라이언트에서만.
-
-| 라우트 | 유형 | 설명 |
-|---|---|---|
-| `/` | RSC 셸 + 클라 `<MapView>` | 지도 홈. 시군구 choropleth. 칸 집계는 서버 prefetch 후 클라 전달 |
-| `/login` | 클라이언트 | 로그인(카카오 OAuth 추천, DECISIONS #4) |
-| `/auth/callback` | Route Handler | OAuth code → 세션 교환(@supabase/ssr) |
-| `/onboarding` | 클라 위저드 | 내 동네 고르기 → 첫 기록 → 첫 색칠 |
-| `/record/new` | 클라 폼 | 가게 찾기(카카오 키워드 검색) → **상호명 확정(사용자)** → 기록 작성 |
-| `/record/[id]` | RSC + 클라 뷰 | 기록 상세(사진 포함) |
-| `/record/[id]/edit` | 클라 폼 | 기록 수정(가게당 1개 규칙상 재방문=수정) |
-| `/region/[code]` | RSC | 칸 상세: 해당 시군구의 내 기록 목록 |
-| `/settings` | RSC + 서버 액션 | 프로필, 로그아웃, 탈퇴 |
-| `/privacy`, `/terms` | RSC(정적) | 개인정보처리방침 · 이용약관 |
-
-- 인증 가드: `middleware.ts`에서 @supabase/ssr로 세션 갱신 + 비로그인 시 `/login`. 공개 경로: `/login`, `/privacy`, `/terms`, `/auth/*`.
-- 번들 분리: `<MapView>`와 화면용 GeoJSON은 `next/dynamic`(ssr:false)로 지연 로드.
-
----
-
-## 2. 데이터 모델 (Supabase / Postgres)
-
-마이그레이션 SQL 수준. 모든 사용자 테이블 RLS, 본인 행만. **좌표·주소·카카오 상호명은 저장하지 않는다**(DECISIONS #6).
-
-### 2.1 테이블
+사용자 스코프 없음. 모든 식별정보 배제. 시군구 목록·경계는 **레포 정적 파일**(DB 테이블 불필요).
 
 ```sql
--- 프로필
-create table profiles (
-  id uuid primary key references auth.users(id) on delete cascade,
-  nickname text,
-  home_region_code text,
-  onboarding_done boolean not null default false,
-  created_at timestamptz not null default now()
+-- 표 집계: (날짜, 칸, 메뉴, 방문구간) 당 한 행, count 증가
+create table vote_counts (
+  vote_date   date not null,          -- KST 05:00 경계 기준 "오늘"
+  region_code text not null,          -- 시군구 코드
+  menu_type   text not null,          -- 10종 중 하나(키)
+  visit_bucket text not null,         -- 'first' | 'd2_7' | 'd8plus'
+  count       integer not null default 0,
+  primary key (vote_date, region_code, menu_type, visit_bucket)
 );
+create index vote_counts_date_region_idx on vote_counts(vote_date, region_code);
 
--- 기록 (가게 1개당 1행)
-create table records (
-  id uuid primary key default gen_random_uuid(),
-  user_id uuid not null references auth.users(id) on delete cascade,
-  place_name text not null                      -- ★ 사용자 입력(검색 자동완성 가능, 사용자 콘텐츠)
-    check (char_length(place_name) between 1 and 60),
-  region_code text not null,                    -- Turf 판정 결과(우리 데이터)
-  boundary_version date not null,               -- 판정에 쓴 경계 기준일
-  kakao_place_id text,                          -- (선택) 카카오 place id — 약관상 저장 허용. 중복감지·딥링크용
-  kakao_url text,                               -- (선택) 카카오맵 장소 URL — 저장 허용
-  rating smallint not null check (rating between 1 and 5),
-  memo text not null check (char_length(memo) between 1 and 200),  -- 한 줄 메모 상한 200자(가정)
-  menu text,
-  visited_on date not null default current_date,
-  created_at timestamptz not null default now(),
-  updated_at timestamptz not null default now()
-);
--- 가게당 1기록: 검색으로 고른 경우 place_id로 유일 보장(MVP는 검색 선택 필수)
-create unique index records_user_place_uq
-  on records(user_id, kakao_place_id) where kakao_place_id is not null;
-create index records_user_region_idx on records(user_id, region_code);
-
--- 사진 (기록당 0~5장)
-create table record_photos (
-  id uuid primary key default gen_random_uuid(),
-  record_id uuid not null references records(id) on delete cascade,
-  user_id uuid not null references auth.users(id) on delete cascade,
-  storage_path text not null,
-  sort_order smallint not null default 0,
-  created_at timestamptz not null default now()
-);
-create index record_photos_record_idx on record_photos(record_id, sort_order);
-
--- 이벤트 계측
-create table events (
-  id bigint generated always as identity primary key,
-  user_id uuid references auth.users(id) on delete set null,
-  name text not null,
-  props jsonb not null default '{}'::jsonb,
-  created_at timestamptz not null default now()
-);
-create index events_name_created_idx on events(name, created_at);
-
--- 경계 메타(참조용, 공개 읽기)
-create table regions (
-  code text primary key,               -- 시군구 코드
-  name text not null,                  -- 예: "장안구"
-  full_name text not null,             -- 예: "수원시 장안구"
-  sido_code text not null,
-  sido_name text not null,
-  has_gu boolean not null default false,
-  boundary_version date not null
+-- 단계별 이벤트 횟수만
+create table event_counts (
+  event_date date not null,
+  name       text not null,           -- 'home_view' | 'menu_select' | 'decide' | ...
+  count      integer not null default 0,
+  primary key (event_date, name)
 );
 ```
 
-> **좌표 미저장의 결과(의도된 제약)**: ① 지도에 개별 가게 마커를 못 찍는다 → MVP는 **시군구 choropleth만**. ② 경계가 바뀌어도 저장된 기록을 **자동 재판정 불가**(좌표가 없음). → 경계 수동 패치는 **베타 전에 완료**해 `boundary_version`을 베타 기간 고정. 이후 경계 변경 시엔 기록이 옛 판정을 유지(또는 사용자가 재저장). DECISIONS #6.
-
-### 2.2 트리거 / 함수
-
+**원자적 증가 (RPC, service_role로만 호출)**
 ```sql
-create function touch_updated_at() returns trigger language plpgsql as $$
-begin new.updated_at = now(); return new; end $$;
-create trigger records_touch before update on records
-  for each row execute function touch_updated_at();
+create function bump_vote(d date, r text, m text, b text)
+returns void language sql as $$
+  insert into vote_counts(vote_date, region_code, menu_type, visit_bucket, count)
+  values (d, r, m, b, 1)
+  on conflict (vote_date, region_code, menu_type, visit_bucket)
+  do update set count = vote_counts.count + 1;
+$$;
 
--- 사진 5장 제한(서버 측 2차 방어)
-create function enforce_photo_limit() returns trigger language plpgsql as $$
-begin
-  if (select count(*) from record_photos where record_id = new.record_id) >= 5 then
-    raise exception 'photo limit (5) exceeded for record %', new.record_id;
-  end if;
-  return new;
-end $$;
-create trigger record_photos_limit before insert on record_photos
-  for each row execute function enforce_photo_limit();
-
--- 단계 변환(SQL, 상수 미러 — stage_up 이벤트용)
-create function region_stage(cnt int) returns int language sql immutable as $$
-  select case
-    when cnt = 0 then 0 when cnt <= 5 then 1 when cnt <= 10 then 2
-    when cnt <= 15 then 3 when cnt <= 20 then 4 else 5 end
+create function bump_event(d date, n text)
+returns void language sql as $$
+  insert into event_counts(event_date, name, count) values (d, n, 1)
+  on conflict (event_date, name) do update set count = event_counts.count + 1;
 $$;
 ```
 
-### 2.3 RLS 정책
-
+**RLS (사용자 없음 → anon 전면 차단, service_role만 통과)**
 ```sql
-alter table profiles      enable row level security;
-alter table records       enable row level security;
-alter table record_photos enable row level security;
-alter table events        enable row level security;
-alter table regions       enable row level security;
-
-create policy own_profiles on profiles
-  for all using (id = auth.uid()) with check (id = auth.uid());
-create policy own_records on records
-  for all using (user_id = auth.uid()) with check (user_id = auth.uid());
-create policy own_photos on record_photos
-  for all using (user_id = auth.uid()) with check (user_id = auth.uid());
-create policy own_events_insert on events
-  for insert with check (user_id = auth.uid());
-create policy own_events_select on events
-  for select using (user_id = auth.uid());
--- regions: 모든 로그인 사용자 읽기 전용(쓰기는 service_role)
-create policy regions_read on regions for select using (true);
+alter table vote_counts  enable row level security;
+alter table event_counts enable row level security;
+-- 정책을 만들지 않는다 = anon/authenticated 는 읽기·쓰기 모두 거부.
+-- 집계 조회(GET /api/today, /api/map)도 Route Handler에서 service_role로 수행한다.
 ```
+> 브라우저는 DB에 직접 접근 불가. 모든 읽기/쓰기는 Route Handler 경유.
 
-- Storage 버킷 `record-photos`(비공개). 경로 접두사 `{{uid}}/...` 소유자만 CRUD.
-```sql
-create policy photos_own on storage.objects for all
-  using (bucket_id = 'record-photos' and (storage.foldername(name))[1] = auth.uid()::text)
-  with check (bucket_id = 'record-photos' and (storage.foldername(name))[1] = auth.uid()::text);
-```
-- 읽기: `createSignedUrl`(수 분 만료) **(가정)**. 공개 버킷 미사용.
+## 3. "오늘"·메뉴·색 상수
 
-### 2.4 집계 뷰 (색칠용)
+- **오늘(vote_date)**: KST 05:00~익일 05:00. 서버에서 계산 — `now()` KST 기준, 05시 이전이면 전날. `src/lib/today.ts`.
+- **메뉴 10종**(기획서 §지도표현): 한식·국밥탕·면·중식·일식·양식·분식·고기구이·샐러드건강식·아시안. 각: `{ key, label, searchKeywords[], color }`. `src/lib/menus.ts`.
+- **칠하기 규칙**: 칸 총표 ≥ 5일 때만 색칠. 색 = 1위 메뉴 고정색. 진하기 3단계(5~9 / 10~29 / 30+). 동률 1위 = 회색 빗금. 범례 상시. (기준값 5는 가정 — DECISIONS)
+- **넘겨 보여주기**: 내 칸 <5표 → 시도 TOP3, 시도도 <5표 → 전국 TOP3. (시도 = region_code 접두 2자리, 전처리에서 확정)
 
-```sql
--- 가게당 1기록이므로 region별 기록 수 = 서로 다른 가게 수
-create view v_region_counts with (security_invoker = true) as
-  select user_id, region_code, count(*)::int as store_count
-  from records
-  group by user_id, region_code;
-```
-- 클라/서버: `select region_code, store_count from v_region_counts where user_id = auth.uid()`. 단계 변환은 공유 상수(`toStage`, §5)로.
+## 4. Route Handler (API 계약)
 
----
+공통: JSON `{ error:{code,message} }`. 외부 호출 없음(카카오는 클라). 쓰기는 service_role.
 
-## 3. Route Handler 목록
-
-공통 에러 규약: `{{ error: { code, message }}}` + HTTP 코드(400 검증, 401 비로그인, 404, 409 중복, 422 처리불가, 429 카카오 쿼터, 502 카카오 실패, 500).
-
-| 경로 / 메서드 | 입력 | 출력 | 카카오 호출 | 에러 처리 |
-|---|---|---|---|---|
-| `GET /auth/callback` | `?code` | 리다이렉트 | 없음 | 실패 시 `/login?error` |
-| `GET /api/places/search` | `q`, `lat?`, `lng?`, `page?` | 후보[] `{{name, address, lat, lng, kakao_place_id, kakao_url}}` (**화면 표시용, 서버 미저장**) | **예**(`/v2/local/search/keyword`, `category_group_code=FD6`) | `q` 2자 미만 400, 502 passthrough, 빈 결과 200 |
-| `GET /api/places/nearby` | `lat`, `lng`, `radius?` | 후보[] (동일, 미저장) | 예(`category?category_group_code=FD6&x&y&radius`) | 좌표 누락 400. **MVP 축소 대상(Should)** |
-| `POST /api/records` | `place_name`(사용자), `lat`,`lng`(선택 후보의 좌표, **판정용**), `kakao_place_id?`,`kakao_url?`, rating, memo, menu?, visited_on?, photoPaths[]? | 생성된 record | 없음 | 검증 400, `records_user_place_uq` 위반 409(수정 유도), 좌표로 판정 실패 422 |
-| `PATCH /api/records/[id]` | 부분 필드(place_id 불변 권장) | 수정된 record | 없음 | 404/403 |
-| `DELETE /api/records/[id]` | - | 204 | 없음 | 사진 storage도 함께 삭제 |
-| `POST /api/account/delete` | - | 204 | 없음 | service_role로 데이터+storage+auth user 삭제 |
-
-- `POST /api/records` 내부 순서: 인증 → zod 검증 → **좌표로 Turf 판정 → region_code·boundary_version 산출, 좌표는 버림(저장 X)** → insert(유일 위반 409) → 사진 행 연결 → 이벤트 적재(record_save, 조건부 first_record_save, stage_up).
-- `/api/places/search`는 **유일한 외부(카카오) 호출**. 응답을 서버 DB에 쓰지 않는다(약관). 클라가 받은 좌표는 저장용 `POST`로 되돌아오지만 서버는 판정에만 쓰고 폐기.
-- 이벤트: 클라 발생분(onboarding_start, record_start)은 `supabase.from('events').insert`(RLS 보호). 서버만 아는 것(first_record_save, stage_up)은 `POST /api/records` 내부.
-
----
-
-## 4. 칸 판정 설계 (핵심 로직)
-
-판정은 **기록 저장 시 1회** 서버에서 좌표로 수행하고 `region_code` + `boundary_version`만 저장한다. 좌표는 저장하지 않는다. 조회 시 재판정 없음(색칠=단순 집계).
-
-### 4.1 경계 데이터 전처리 절차
-1. SGIS 시군구 경계 원본(2025-06-30 기준, SHP/GeoJSON) 다운로드.
-2. 좌표계 WGS84(EPSG:4326)로 변환(proj4/mapshaper).
-3. **2026-07 개편 수동 패치**(확인됨, SGIS 미반영): 인천 2군·9구(제물포·영종·검단 신설 등), 전남광주통합특별시 경계·코드 반영. (DECISIONS #1·#3, +4~8h)
-4. 일반구 **구 단위 분할 유지**(DECISIONS #2). `regions.has_gu=true`, `full_name`에 "시 구" 병기.
-5. mapshaper 두 산출물:
-   - **판정용**: `-simplify 20% keep-shapes` 수준 **(가정)**. 정확도 우선. 서버(Route Handler) 번들 동봉.
-   - **화면용**: `-simplify 4% keep-shapes -quantize` 수준 **(가정)**. §7 크기 목표까지 조정.
-6. `region_code`를 두 산출물·`regions`에서 동일 키로. `boundary_version`(예: `2026-07-01`) 기록.
-
-### 4.2 판정용 / 화면용 분리
-- 판정용 GeoJSON: `src/lib/boundaries/judge.geojson`(함수 번들). **bbox prefilter**(flatbush 또는 bbox 배열) 후 후보 폴리곤만 `booleanPointInPolygon`. 모듈 스코프 1회 로드(람다 인스턴스 재사용) → 저장 1건당 수 ms.
-- 화면용 GeoJSON: `/public` 또는 CDN 정적 자산. MapLibre `source`로 로드, `fill-color`는 feature-state(region→stage) 데이터 기반 표현식.
-
-### 4.3 boundary_version 관리 · 재판정
-- 경계 패치본은 **베타 시작 전 확정** → 베타 중 `boundary_version` 고정.
-- ⚠️ 좌표 미저장이라 **기존 기록 자동 재판정 불가**. 베타 후 경계 변경이 필요하면: (a) 기록은 옛 판정 유지(허용), (b) 해당 지역 사용자에게 재저장 유도 — 중 택. MVP·베타 범위 밖.
-
-### 4.4 테스트 (핵심 로직만)
-- `region.test.ts`: 경계·일반구 + **인천·전남광주 개편 영역** 테스트 좌표 50개(정답 라벨). PLAN 위험검증(b).
-- `stage.test.ts`: `toStage` 경계값(0,1,5,6,10,11,15,16,20,21).
-- RLS: 다른 user_id 행 read/write 차단(토큰 2개 통합 테스트).
-
----
-
-## 5. 색칠 집계 · 단계 상수
-
-```ts
-// src/lib/constants.ts  (클라·서버·SQL region_stage() 미러)
-export const STAGE_THRESHOLDS = [0, 5, 10, 15, 20] as const;
-// store_count -> stage: 0 / 1~5 / 6~10 / 11~15 / 16~20 / 21+
-export function toStage(count: number): 0|1|2|3|4|5 {
-  if (count === 0) return 0;
-  if (count <= 5) return 1;
-  if (count <= 10) return 2;
-  if (count <= 15) return 3;
-  if (count <= 20) return 4;
-  return 5;
-}
-export const STAGE_COLORS = ['#00000000','#ffe0b2','#ffb74d','#ff9800','#f57c00','#e65100']; // 가정, 디자인 시 조정
-```
-- 색칠: `v_region_counts`에서 `{{region_code: store_count}}` → MapLibre feature-state로 각 폴리곤에 `toStage` 색 적용. 0(미방문)=투명.
-
----
-
-## 6. 이벤트 목록
-
-| 이름 | 발생 시점 | props | 적재 |
+| 경로 / 메서드 | 입력 | 출력 | 처리 |
 |---|---|---|---|
-| `onboarding_start` | 온보딩 진입 | `{{}}` | 클라 |
-| `onboarding_complete` | 첫 색칠 노출 | `{{ region_code }}` | 클라 |
-| `record_start` | 기록 작성 진입 | `{{ source: 'search'|'nearby'|'onboarding' }}` | 클라 |
-| `record_save` | 저장 성공 | `{{ record_id, region_code, rating, is_new }}` | 서버 |
-| `first_record_save` | 최초 기록 | `{{ record_id, region_code }}` | 서버(records count==1) |
-| `stage_up` | 저장 후 칸 단계 상승 | `{{ region_code, from, to }}` | 서버(저장 전후 region_stage 비교) |
+| `POST /api/vote` | `{ region_code, menu_type, visit_bucket }` | `{ ok, region_menu_count }` | zod 검증(코드/메뉴/구간 화이트리스트) → IP 레이트리밋 → `bump_vote(today, ...)` → (Should) 해당 칸·메뉴 오늘 합 반환 |
+| `GET /api/today?region=` | region_code | `{ scope:'region'|'sido'|'nation', top3:[{menu_type,count}] }` | 칸 합계 ≥5면 region, 아니면 시도, 그것도 <5면 전국. 캐시 30~60s |
+| `GET /api/map` | - | `{ vote_date, cells:[{region_code, top_menu, count, tie:boolean}] }` | 오늘, 칸별 합 ≥5만. 동률 tie=true. 캐시 30~60s |
+| `POST /api/event` | `{ name }` | `{ ok }` | 화이트리스트 이벤트만 `bump_event`. 레이트리밋 가벼움 |
 
-- 전부 `events` 테이블. 분석은 Supabase SQL 수동(별도 툴 미도입).
+- 레이트리밋: IP 해시 기반 만료 카운터(Upstash). 초과 시 429. IP 원문·해시 모두 **DB 미저장**(메모리/카운터만).
+- `/api/vote`·`/api/event`는 `cache: no-store`. `/api/today`·`/api/map`은 `revalidate`/`Cache-Control`로 30~60s.
 
----
+## 5. 클라이언트 흐름 (카카오 JS SDK, 익명)
 
-## 7. 성능 기준 (가정)
+1. **칸 찾기**: `navigator.geolocation` → 좌표 → `Geocoder.coord2RegionCode(lng,lat)` → 시군구 코드. **좌표는 즉시 버림**(서버 전송·저장 X). 권한 거부 시 시도→시군구 직접 선택(마지막 선택 localStorage 기억).
+2. **홈**: `GET /api/today?region=`로 TOP3 칩. `POST /api/event {home_view}`.
+3. **메뉴 선택/룰렛**: 10종 중 택1 또는 룰렛. `POST /api/event {menu_select}`.
+4. **가게 시트**: `Places.keywordSearch(menu.searchKeywords, { location, radius, sort:'distance' })` → 거리순 목록 → 가게 클릭 시 카카오맵 상세(place_url)로 이동. **결과 저장 안 함.**
+5. **이걸로 결정**: localStorage로 "오늘 결정함" 확인(하루 1회) → `POST /api/vote { region_code, menu_type, visit_bucket }` → 결정 완료(Should: "오늘 OO구에서 OO 고른 사람 N명").
+6. **방문 구간**: localStorage의 최초 방문일 → `first | d2_7 | d8plus` 계산해 투표에 포함. 날짜 원본은 전송 안 함.
+7. **지도**: `GET /api/map` → d3-geo로 시군구 GeoJSON을 SVG path로 그리고 `top_menu` 색·3단계 진하기 적용. 칸 탭 → `GET /api/today?region=`.
 
-| 항목 | 목표 | 방법 |
-|---|---|---|
-| 모바일 첫 로드(LCP) | 3초 이내 **(가정)** | 지도·경계 지연 로드, RSC 스트리밍 |
-| 화면용 경계 파일 | gzip ≤ 500KB(목표), 상한 800KB **(가정)** | mapshaper simplify/quantize. 초과 시 뷰포트 로딩/줌별 분할 |
-| 사진 업로드 | 긴 변 1280px, EXIF 제거 | browser-image-compression 재인코딩 |
-| 칸 판정 응답 | p95 ≤ 300ms **(가정)** | bbox prefilter + 모듈 캐시 |
+## 6. 칸 경계 데이터 (레포 정적)
+- 단순화 시군구 GeoJSON(d3-geo SVG용) + 시군구 목록(코드·이름·시도). `scripts/build-boundaries.mjs`로 생성(mapshaper).
+- **칸 판정은 1차로 카카오 `coord2RegionCode`**. 단 기획서 리스크 #4(판정 결과 코드 저장의 약관 적합성)·#6(2026-07 개편 코드 일치)이 **미확인** → 불일치/제약 시 **공개 경계로 클라 point-in-polygon 폴백**(판정용 GeoJSON + Turf/d3). DECISIONS.
+- 2026-07 개편(인천 2군·9구, 전남광주통합특별시)은 SGIS 미반영 확인됨(이전 조사) → 경계·코드 매칭을 개발 초기에 검증.
 
-> 경계 파일이 목표 초과 시: "뷰포트 안 시군구만 로딩" 또는 "광역 줌에서 광역 단위 집계"로 완화(Should).
+## 7. 남용 방지 (기획서 §남용방지, 3단계)
+1. **브라우저**: localStorage로 결정 하루 1회. (지우면 우회 — 수용)
+2. **서버**: IP별 만료 카운터로 단시간 다수 요청 차단. IP DB 미저장.
+3. **집계**: 한 칸 1시간 비정상 급증 시 지도에서 보류 + 수동 확인. 기준값은 운영 데이터로. (MVP는 보류 플래그 수동 토글 수준)
+
+## 8. 계측 (익명)
+- `event_counts`: `home_view`, `menu_select`, `roulette_spin`, `decide`, `map_view`, `share_click`(Should).
+- 결정 소요시간은 **클라에서 구간(30s미만/30~60s/60s+)만 계산해** event로. 원시 시간 미전송.
+- 지표 산출(전환율·재방문 구간 비율 등)은 Supabase SQL 수동.
+
+## 9. 성능 (가정)
+- 모바일 홈→가게목록 1초 안팎(기획서 완료조건). 지도 SVG는 단순화 경계로 경량(목표 gzip ≤500KB).
+- 카카오 호출은 **메뉴 선택 후에만**(쿼터 보호, 리스크 #3).
