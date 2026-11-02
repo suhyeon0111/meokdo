@@ -1,4 +1,5 @@
 import { MENUS } from "@/lib/menus";
+import FindMyCell from "@/components/FindMyCell";
 
 export default function Home() {
   return (
@@ -15,9 +16,7 @@ export default function Home() {
         오늘 점심 메뉴를 고르면, 그 선택이 모여 동네 지도가 칠해집니다.
       </p>
 
-      <p style={{ color: "var(--muted)", marginTop: 24, fontSize: 14 }}>
-        기반 셋업 완료(API·DB·라이브러리). 다음: 카카오 JS SDK로 내 칸 찾기 + 가게 검색(SCHEDULE Day 1~3).
-      </p>
+      <FindMyCell />
 
       <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 24 }}>
         {MENUS.map((m) => (
