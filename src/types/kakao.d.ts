@@ -38,12 +38,19 @@ export interface KakaoPlaces {
   ): void;
 }
 
+export interface KakaoLatLng {
+  getLat(): number;
+  getLng(): number;
+}
+
 export interface KakaoMaps {
   load(callback: () => void): void;
+  LatLng: new (lat: number, lng: number) => KakaoLatLng;
   services: {
     Geocoder: new () => KakaoGeocoder;
     Places: new () => KakaoPlaces;
     Status: { OK: string; ZERO_RESULT: string; ERROR: string };
+    SortBy: { DISTANCE: string; ACCURACY: string };
   };
 }
 
