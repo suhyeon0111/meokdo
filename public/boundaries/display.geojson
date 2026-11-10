@@ -1,0 +1,36 @@
+{
+  "type": "FeatureCollection",
+  "_note": "⚠️ 샘플 더미 데이터. scripts/build-boundaries.mjs 가 실제 SGIS 경계로 덮어씀. 실제 좌표/형상 아님.",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": { "region_code": "11680", "full_name": "강남구" },
+      "geometry": { "type": "Polygon", "coordinates": [[[126.98,37.46],[127.08,37.46],[127.08,37.52],[126.98,37.52],[126.98,37.46]]] }
+    },
+    {
+      "type": "Feature",
+      "properties": { "region_code": "41110", "full_name": "수원시 장안구" },
+      "geometry": { "type": "Polygon", "coordinates": [[[126.95,37.27],[127.05,37.27],[127.05,37.33],[126.95,37.33],[126.95,37.27]]] }
+    },
+    {
+      "type": "Feature",
+      "properties": { "region_code": "28110", "full_name": "인천 중구" },
+      "geometry": { "type": "Polygon", "coordinates": [[[126.55,37.44],[126.65,37.44],[126.65,37.50],[126.55,37.50],[126.55,37.44]]] }
+    },
+    {
+      "type": "Feature",
+      "properties": { "region_code": "26110", "full_name": "부산 중구" },
+      "geometry": { "type": "Polygon", "coordinates": [[[128.98,35.07],[129.08,35.07],[129.08,35.13],[128.98,35.13],[128.98,35.07]]] }
+    },
+    {
+      "type": "Feature",
+      "properties": { "region_code": "11110", "full_name": "종로구" },
+      "geometry": { "type": "Polygon", "coordinates": [[[126.95,37.56],[127.03,37.56],[127.03,37.61],[126.95,37.61],[126.95,37.56]]] }
+    },
+    {
+      "type": "Feature",
+      "properties": { "region_code": "30110", "full_name": "대전 동구" },
+      "geometry": { "type": "Polygon", "coordinates": [[[127.42,36.30],[127.52,36.30],[127.52,36.36],[127.42,36.36],[127.42,36.30]]] }
+    }
+  ]
+}
