@@ -32,8 +32,5 @@ jobs:
 
       - name: Build
         run: npm run build
-        # env는 런타임 전용(route handler / Supabase 클라이언트)이라 빌드엔 불필요.
-        # 실제 키는 Vercel에 등록하고, 여기선 빌드 통과용 더미값만 둔다.
-        env:
-          NEXT_PUBLIC_SUPABASE_URL: https://example.supabase.co
-          NEXT_PUBLIC_SUPABASE_ANON_KEY: dummy-anon-key
+        # 빌드는 env 불필요 — API 라우트는 force-dynamic이라 빌드 타임에 실행되지 않고,
+        # 실제 키(Supabase/Kakao)는 Vercel 런타임에만 등록한다.
