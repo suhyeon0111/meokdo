@@ -2,7 +2,11 @@ import { NextResponse } from "next/server";
 import { admin } from "@/lib/supabase/admin";
 import { kstVoteDate } from "@/lib/today";
 
-export const revalidate = 30; // 30s 캐시 (가정)
+// DB를 매 요청 조회하므로 동적. 빌드 타임 프리렌더 금지(그때 DB env 없음).
+export const dynamic = "force-dynamic";
+
+// CDN 캐시 30s (가정) — 응답 헤더로
+const CACHE = { "Cache-Control": "public, s-maxage=30, stale-while-revalidate=30" };
 
 type Row = { menu_type: string; cnt: number };
 
@@ -34,7 +38,7 @@ export async function GET(request: Request) {
   }
   let packed = pack((regionRows ?? []) as Row[]);
   if (packed.total >= 5) {
-    return NextResponse.json({ scope: "region", ...packed });
+    return NextResponse.json({ scope: "region", ...packed }, { headers: CACHE });
   }
 
   // 2) 시도 (코드 앞 2자리)
@@ -42,11 +46,11 @@ export async function GET(request: Request) {
   const { data: sidoRows } = await sb.rpc("top_menus_prefix", { d, p: sido });
   packed = pack((sidoRows ?? []) as Row[]);
   if (packed.total >= 5) {
-    return NextResponse.json({ scope: "sido", ...packed });
+    return NextResponse.json({ scope: "sido", ...packed }, { headers: CACHE });
   }
 
   // 3) 전국
   const { data: natRows } = await sb.rpc("top_menus_prefix", { d, p: "" });
   packed = pack((natRows ?? []) as Row[]);
-  return NextResponse.json({ scope: "nation", ...packed });
+  return NextResponse.json({ scope: "nation", ...packed }, { headers: CACHE });
 }
