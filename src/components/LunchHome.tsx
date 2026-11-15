@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import Link from "next/link";
 import { loadKakao } from "@/lib/kakao/loader";
 import {
   resolveCell,
@@ -135,6 +136,12 @@ export default function LunchHome() {
       <section style={{ marginTop: 20 }}>
         <p style={{ fontSize: 13, color: "var(--muted)", margin: "0 0 8px" }}>또는 직접 고르기</p>
         <MenuPicker onSelect={onSelectMenu} />
+      </section>
+
+      <section style={{ marginTop: 24 }}>
+        <Link href="/map" style={{ ...primaryBtn, display: "block", textAlign: "center", textDecoration: "none" }}>
+          🗺️ 오늘의 점심 지도 보기
+        </Link>
       </section>
 
       {selectedMenu && coords && cell && (
