@@ -1,0 +1,20 @@
+version: 2
+updates:
+  # npm 의존성 (Next, Supabase, maplibre 등)
+  - package-ecosystem: npm
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      # 자잘한 patch/minor는 하나의 PR로 묶어서 소음 감소
+      minor-and-patch:
+        update-types:
+          - minor
+          - patch
+
+  # GitHub Actions 버전 업데이트
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
