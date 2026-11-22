@@ -3,6 +3,8 @@ updates:
   # npm 의존성 (Next, Supabase, maplibre 등)
   - package-ecosystem: npm
     directory: "/"
+    # Git Flow: 업데이트 PR도 develop으로 받는다
+    target-branch: develop
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
@@ -16,5 +18,6 @@ updates:
   # GitHub Actions 버전 업데이트
   - package-ecosystem: github-actions
     directory: "/"
+    target-branch: develop
     schedule:
       interval: weekly
